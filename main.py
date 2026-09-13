@@ -1,188 +1,843 @@
 import cv2
-import mediapipe as mp
 import math
+import urllib.request
+from pathlib import Path
 
-# Инициализация объектов MediaPipe для обработки рук
+import mediapipe as mp
+
+
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
+
+CAMERA_ID = 0
+
+MIN_DETECTION_CONFIDENCE = 0.6
+MIN_TRACKING_CONFIDENCE = 0.6
+
+BALL_RADIUS = 12
+
+GRAVITY = 0.45
+
+BOUNCE_STRENGTH = 0.9
+
+HORIZONTAL_SPEED = 0.0
+
+MODEL_PATH = Path("hand_landmarker.task")
+
+MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "hand_landmarker/hand_landmarker/float16/1/"
+    "hand_landmarker.task"
+)
+
+
+# ============================================================
+# ЗАГРУЗКА МОДЕЛИ MEDIAPIPE
+# ============================================================
+
+def download_model():
+    """
+    Загружает модель MediaPipe Hand Landmarker,
+    если её ещё нет рядом с main.py.
+    """
+
+    if MODEL_PATH.exists():
+        return
+
+    print("MediaPipe model not found.")
+    print("Downloading hand_landmarker.task...")
+
+    try:
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    except Exception as error:
+        raise RuntimeError(
+            "Не удалось скачать модель MediaPipe.\n"
+            f"Ошибка: {error}\n\n"
+            "Скачай hand_landmarker.task вручную и положи "
+            "рядом с main.py."
+        )
+
+    print("Model downloaded successfully.")
+
+
+# ============================================================
+# ИНИЦИАЛИЗАЦИЯ MEDIAPIPE
+# ============================================================
+
 def initHandelObject():
-    mp_hands = mp.solutions.hands
-    hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
-    mp_drawing = mp.solutions.drawing_utils
-    return hands, mp_drawing, mp_hands
+    """
+    Создаёт Hand Landmarker через новый MediaPipe Tasks API.
+    """
 
-# Нахождение координат кончиков указательных пальцев
-def setFingerCoord(landmarks, frame):
-    x1, y1 = landmarks.landmark[8].x, landmarks.landmark[8].y  # Кончик указательного пальца
-    x2, y2 = landmarks.landmark[5].x, landmarks.landmark[5].y  # Основание указательного пальца
+    download_model()
 
-    height, width = frame.shape[0], frame.shape[1]
+    BaseOptions = mp.tasks.BaseOptions
+    HandLandmarker = mp.tasks.vision.HandLandmarker
+    HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
+    VisionRunningMode = mp.tasks.vision.RunningMode
 
-    normalX1, normalY1 = int(x1 * width), int(y1 * height)  # для кончика
-    normalX2, normalY2 = int(x2 * width), int(y2 * height)  # для основания
+    options = HandLandmarkerOptions(
+        base_options=BaseOptions(
+            model_asset_path=str(MODEL_PATH)
+        ),
+        running_mode=VisionRunningMode.IMAGE,
+        num_hands=2,
+        min_hand_detection_confidence=MIN_DETECTION_CONFIDENCE,
+        min_hand_presence_confidence=MIN_DETECTION_CONFIDENCE,
+        min_tracking_confidence=MIN_TRACKING_CONFIDENCE,
+    )
 
-    return normalX1, normalY1, normalX2, normalY2
+    hand_landmarker = HandLandmarker.create_from_options(options)
 
-# Рисование линии между кончиками пальцев правой и левой руки
-def drawLine(frame, normalX1, normalY1, normalX2, normalY2):
-    frame = cv2.line(frame, (normalX1, normalY1), (normalX2, normalY2), (0, 0, 255), 2)
-    return frame
+    return hand_landmarker
 
-# Определение левой или правой руки
-def setRightOrLeftHand(landmarks):
-    x_center = landmarks.landmark[9].x  # Координата центра ладони по оси x
 
-    if x_center < 0.5:
-        return 'left'  # Левая рука
-    else:
-        return 'right'  # Правая рука
+# ============================================================
+# КООРДИНАТЫ ПАЛЬЦА
+# ============================================================
 
-# Функция создания мяча
+def getFingerCoord(hand_landmarks, frame):
+    """
+    Получает координаты:
+        8 — кончик указательного пальца
+        5 — основание указательного пальца
+    """
+
+    height, width = frame.shape[:2]
+
+    finger_tip = hand_landmarks[8]
+    finger_base = hand_landmarks[5]
+
+    x1 = int(finger_tip.x * width)
+    y1 = int(finger_tip.y * height)
+
+    x2 = int(finger_base.x * width)
+    y2 = int(finger_base.y * height)
+
+    return x1, y1, x2, y2
+
+
+# ============================================================
+# РИСОВАНИЕ РУКИ
+# ============================================================
+
+HAND_CONNECTIONS = [
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 4),
+
+    (0, 5),
+    (5, 6),
+    (6, 7),
+    (7, 8),
+
+    (5, 9),
+    (9, 10),
+    (10, 11),
+    (11, 12),
+
+    (9, 13),
+    (13, 14),
+    (14, 15),
+    (15, 16),
+
+    (13, 17),
+    (17, 18),
+    (18, 19),
+    (19, 20),
+
+    (0, 17),
+]
+
+
+def drawHand(frame, landmarks):
+    """
+    Рисует точки и соединения руки.
+    """
+
+    height, width = frame.shape[:2]
+
+    points = []
+
+    for landmark in landmarks:
+        x = int(landmark.x * width)
+        y = int(landmark.y * height)
+
+        points.append((x, y))
+
+        cv2.circle(
+            frame,
+            (x, y),
+            4,
+            (255, 255, 255),
+            -1
+        )
+
+    for start, end in HAND_CONNECTIONS:
+        cv2.line(
+            frame,
+            points[start],
+            points[end],
+            (0, 255, 0),
+            2
+        )
+
+
+# ============================================================
+# СОЗДАНИЕ МЯЧА
+# ============================================================
+
 def createBall(frame_width, frame_height):
-    ball_pos_x, ball_pos_y = 320, 5  # Начальная позиция мяча
-    ball_radius = 10
-    speed_x = 0  # Начальная скорость по оси X
-    speed_y = 0  # Начальная скорость по оси Y
-    gravity_y = 0.5  # Гравитация
-    bounce_strength = 1.5  # Коэффициент отскока
-    return ball_pos_x, ball_pos_y, ball_radius, speed_x, speed_y, gravity_y, bounce_strength
+    """
+    Начальное состояние мяча.
+    """
 
-# Функция для проверки столкновения мяча с наклонной линией
-def checkBallLineCollision(ball_pos_x, ball_pos_y, ball_radius, normalX1, normalY1, normalX2, normalY2):
-    line_slope = (normalY2 - normalY1) / (normalX2 - normalX1) if normalX2 != normalX1 else float('inf')
+    ball_pos_x = frame_width // 2
+    ball_pos_y = 80
 
-    if line_slope == float('inf'):
-        if abs(ball_pos_x - normalX1) < ball_radius:
-            return True, line_slope
-    else:
-        line_y = line_slope * (ball_pos_x - normalX1) + normalY1
-        if abs(ball_pos_y - line_y) < ball_radius:
-            return True, line_slope
+    ball_radius = BALL_RADIUS
 
-    return False, 0
+    speed_x = HORIZONTAL_SPEED
+    speed_y = 0.0
 
-# Функция для расчета отскока мяча от наклонной линии
-def calculateBounce(speed_y, line_slope, bounce_strength):
-    if line_slope != float('inf'):
-        angle_of_incidence = math.atan(line_slope)
-        bounce_angle = 2 * angle_of_incidence
-        bounce_speed = speed_y * bounce_strength * math.cos(bounce_angle)
-        return -bounce_speed
-    else:
-        return -speed_y * bounce_strength
+    return (
+        float(ball_pos_x),
+        float(ball_pos_y),
+        ball_radius,
+        speed_x,
+        speed_y,
+    )
 
-# Обработка отскока мяча от стен и верха экрана
-def handleWallCollisions(ball_pos_x, ball_pos_y, ball_radius, speed_x, speed_y, frame_width, frame_height,
-                         bounce_strength):
-    # Отскок от верхней границы
-    if ball_pos_y - ball_radius <= 0:
-        speed_y = -speed_y * bounce_strength
 
-    # Отскок от нижней границы (появление сверху)
-    if ball_pos_y + ball_radius >= frame_height:
-        ball_pos_y = ball_radius  # Сбрасываем мяч наверх
-        speed_y = 0  # Сброс скорости
+# ============================================================
+# РАССТОЯНИЕ ОТ ТОЧКИ ДО ОТРЕЗКА
+# ============================================================
 
-    # Отскок от левой границы
-    if ball_pos_x - ball_radius <= 0:
-        speed_x = -speed_x * bounce_strength
+def distancePointToSegment(
+    px,
+    py,
+    x1,
+    y1,
+    x2,
+    y2
+):
+    """
+    Расстояние от точки до отрезка.
+    Также возвращает ближайшую точку на отрезке.
+    """
 
-    # Отскок от правой границы
-    if ball_pos_x + ball_radius >= frame_width:
-        speed_x = -speed_x * bounce_strength
+    dx = x2 - x1
+    dy = y2 - y1
 
-    return speed_x, speed_y, ball_pos_y
+    if dx == 0 and dy == 0:
+        distance = math.hypot(px - x1, py - y1)
 
-# Основной метод открытия и обработки обнаружения рук через камеру
-def mainWhileCam(hands, mp_drawing, mp_hands):
-    # Открываем камеру
-    cam = cv2.VideoCapture(0)
+        return distance, x1, y1
 
-    # Получение ширины и высоты окна камеры
-    frame_width = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    t = (
+        (px - x1) * dx +
+        (py - y1) * dy
+    ) / (dx * dx + dy * dy)
 
-    print(f"Width: {frame_width}, Height: {frame_height}")
+    t = max(0.0, min(1.0, t))
 
-    left_hand_coords = None
-    right_hand_coords = None
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
 
-    # Начальные параметры мяча
-    ball_pos_x, ball_pos_y, ball_radius, speed_x, speed_y, gravity_y, bounce_strength = createBall(frame_width,
-                                                                                                   frame_height)
+    distance = math.hypot(
+        px - closest_x,
+        py - closest_y
+    )
 
-    cv2.namedWindow('Hand Detection', cv2.WINDOW_NORMAL)  # Создаем окно с возможностью изменения размера
-    cv2.resizeWindow('Hand Detection', 1280, 720)
+    return distance, closest_x, closest_y
+
+
+# ============================================================
+# СТОЛКНОВЕНИЕ МЯЧА С РАКЕТКОЙ
+# ============================================================
+
+def checkBallLineCollision(
+    ball_x,
+    ball_y,
+    ball_radius,
+    line_x1,
+    line_y1,
+    line_x2,
+    line_y2
+):
+    """
+    Проверяет столкновение мяча с отрезком,
+    соединяющим два указательных пальца.
+    """
+
+    distance, closest_x, closest_y = distancePointToSegment(
+        ball_x,
+        ball_y,
+        line_x1,
+        line_y1,
+        line_x2,
+        line_y2
+    )
+
+    if distance <= ball_radius:
+        return True, closest_x, closest_y
+
+    return False, closest_x, closest_y
+
+
+# ============================================================
+# ОТСКОК ОТ ЛИНИИ
+# ============================================================
+
+def calculateBounce(
+    ball_x,
+    ball_y,
+    speed_x,
+    speed_y,
+    line_x1,
+    line_y1,
+    line_x2,
+    line_y2
+):
+    """
+    Рассчитывает отражение скорости мяча
+    относительно нормали к линии.
+    """
+
+    line_dx = line_x2 - line_x1
+    line_dy = line_y2 - line_y1
+
+    line_length = math.hypot(
+        line_dx,
+        line_dy
+    )
+
+    if line_length == 0:
+        return speed_x, -abs(speed_y)
+
+    # Единичный вектор линии
+    tangent_x = line_dx / line_length
+    tangent_y = line_dy / line_length
+
+    # Нормаль к линии
+    normal_x = -tangent_y
+    normal_y = tangent_x
+
+    # Скорость
+    velocity_x = speed_x
+    velocity_y = speed_y
+
+    # Скалярное произведение скорости на нормаль
+    velocity_normal = (
+        velocity_x * normal_x +
+        velocity_y * normal_y
+    )
+
+    # Отражение
+    reflected_x = (
+        velocity_x -
+        2 * velocity_normal * normal_x
+    )
+
+    reflected_y = (
+        velocity_y -
+        2 * velocity_normal * normal_y
+    )
+
+    reflected_x *= BOUNCE_STRENGTH
+    reflected_y *= BOUNCE_STRENGTH
+
+    # Не позволяем мячу после столкновения
+    # лететь слишком медленно.
+    speed = math.hypot(
+        reflected_x,
+        reflected_y
+    )
+
+    minimum_speed = 5.0
+
+    if speed < minimum_speed:
+        reflected_x *= minimum_speed / max(speed, 0.001)
+        reflected_y *= minimum_speed / max(speed, 0.001)
+
+    return reflected_x, reflected_y
+
+
+# ============================================================
+# СТЕНЫ
+# ============================================================
+
+def handleWallCollisions(
+    ball_x,
+    ball_y,
+    ball_radius,
+    speed_x,
+    speed_y,
+    frame_width,
+    frame_height
+):
+    """
+    Обработка столкновений мяча с границами камеры.
+    """
+
+    # Левая стена
+    if ball_x - ball_radius <= 0:
+
+        ball_x = ball_radius
+        speed_x = abs(speed_x)
+
+    # Правая стена
+    if ball_x + ball_radius >= frame_width:
+
+        ball_x = frame_width - ball_radius
+        speed_x = -abs(speed_x)
+
+    # Верх
+    if ball_y - ball_radius <= 0:
+
+        ball_y = ball_radius
+        speed_y = abs(speed_y)
+
+    # Низ
+    if ball_y + ball_radius >= frame_height:
+
+        # Возвращаем мяч наверх
+        ball_y = ball_radius + 5
+
+        speed_y = 0
+
+    return (
+        ball_x,
+        ball_y,
+        speed_x,
+        speed_y
+    )
+
+
+# ============================================================
+# ОПРЕДЕЛЕНИЕ СТОРОНЫ РУКИ
+# ============================================================
+
+def getHandSide(hand_landmarks):
+    """
+    Определяет положение руки относительно изображения.
+
+    Это НЕ определение Left/Right от MediaPipe.
+    Нам здесь важно только понять,
+    какая рука находится слева/справа на экране.
+    """
+
+    wrist = hand_landmarks[0]
+
+    return wrist.x
+
+
+# ============================================================
+# ОСНОВНОЙ ЦИКЛ КАМЕРЫ
+# ============================================================
+
+def mainWhileCam(hand_landmarker):
+
+    cam = cv2.VideoCapture(CAMERA_ID)
+
+    if not cam.isOpened():
+        print("ERROR: Не удалось открыть камеру.")
+        return
+
+    # Разрешение камеры
+    frame_width = int(
+        cam.get(cv2.CAP_PROP_FRAME_WIDTH)
+    )
+
+    frame_height = int(
+        cam.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    )
+
+    if frame_width <= 0:
+        frame_width = 640
+
+    if frame_height <= 0:
+        frame_height = 480
+
+    print(
+        f"Camera resolution: "
+        f"{frame_width}x{frame_height}"
+    )
+
+    # ========================================================
+    # МЯЧ
+    # ========================================================
+
+    (
+        ball_x,
+        ball_y,
+        ball_radius,
+        speed_x,
+        speed_y,
+    ) = createBall(
+        frame_width,
+        frame_height
+    )
+
+    # ========================================================
+    # ОКНО
+    # ========================================================
+
+    window_name = "OpenCV Ping Pong"
+
+    cv2.namedWindow(
+        window_name,
+        cv2.WINDOW_NORMAL
+    )
+
+    cv2.resizeWindow(
+        window_name,
+        1280,
+        720
+    )
+
+    # Чтобы не было повторных столкновений
+    # с линией в каждом кадре.
+    was_colliding = False
 
     while cam.isOpened():
+
         ret, frame = cam.read()
+
         if not ret:
+            print("ERROR: Не удалось получить кадр.")
             break
 
-        # Преобразуем изображение в формат RGB, так как MediaPipe работает с этим форматом
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # ====================================================
+        # MIRROR
+        # ====================================================
 
-        # Обрабатываем кадр для детекции рук
-        results = hands.process(rgb_frame)
+        frame = cv2.flip(frame, 1)
 
-        # Если в кадре есть руки
-        if results.multi_hand_landmarks:
-            for landmarks in results.multi_hand_landmarks:
-                # Отображаем все точки и соединения на изображении
-                mp_drawing.draw_landmarks(frame, landmarks, mp_hands.HAND_CONNECTIONS)
+        # ====================================================
+        # MEDIAPIPE
+        # ====================================================
 
-                # Определяем, левая или правая рука
-                hand_type = setRightOrLeftHand(landmarks)
+        rgb_frame = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2RGB
+        )
 
-                # Получаем координаты кончиков указательных пальцев
-                normalX1, normalY1, normalX2, normalY2 = setFingerCoord(landmarks, frame)
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=rgb_frame
+        )
 
-                if hand_type == 'left':
-                    left_hand_coords = (normalX1, normalY1, normalX2, normalY2)
-                elif hand_type == 'right':
-                    right_hand_coords = (normalX1, normalY1, normalX2, normalY2)
+        results = hand_landmarker.detect(
+            mp_image
+        )
 
-        # Рисуем линию между кончиками указательных пальцев правой и левой руки
-        if left_hand_coords and right_hand_coords:
-            left_x1, left_y1, left_x2, left_y2 = left_hand_coords
-            right_x1, right_y1, right_x2, right_y2 = right_hand_coords
-            frame = drawLine(frame, left_x1, left_y1, right_x1, right_y1)
+        # ====================================================
+        # РУКИ
+        # ====================================================
 
-            # Проверка столкновения мяча с линией
-            collision, line_slope = checkBallLineCollision(ball_pos_x, ball_pos_y, ball_radius, left_x1, left_y1,
-                                                           right_x1, right_y1)
-            if collision:
-                # Корректируем позицию мяча, чтобы он не зависал
-                ball_pos_y = (line_slope * (ball_pos_x - left_x1) + left_y1) - ball_radius  # Поднятие мяча на линию
-                speed_y = calculateBounce(speed_y, line_slope, bounce_strength)
+        hand_lines = []
 
-        # Обновляем позицию мяча
-        speed_y += gravity_y  # Применяем гравитацию
-        ball_pos_y += speed_y  # Обновляем вертикальную позицию мяча
+        if results.hand_landmarks:
 
-        # Обработка отскока от стен и верха экрана
-        speed_x, speed_y, ball_pos_y = handleWallCollisions(ball_pos_x, ball_pos_y, ball_radius, speed_x, speed_y,
-                                                            frame_width, frame_height, bounce_strength)
+            for landmarks in results.hand_landmarks:
 
-        # Рисуем мяч на экране
-        cv2.circle(frame, (int(ball_pos_x), int(ball_pos_y)), ball_radius, (0, 255, 0), -1)
+                # Рисуем руку
+                drawHand(
+                    frame,
+                    landmarks
+                )
 
-        # Отображаем результат
-        cv2.imshow('Hand Detection', frame)
+                # Координаты указательного пальца
+                (
+                    finger_x,
+                    finger_y,
+                    base_x,
+                    base_y
+                ) = getFingerCoord(
+                    landmarks,
+                    frame
+                )
 
-        # Закрыть окно при нажатии на клавишу 'q'
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+                # Рисуем линию указательного пальца
+                cv2.line(
+                    frame,
+                    (finger_x, finger_y),
+                    (base_x, base_y),
+                    (255, 0, 0),
+                    4
+                )
+
+                # Точка кончика
+                cv2.circle(
+                    frame,
+                    (finger_x, finger_y),
+                    8,
+                    (0, 0, 255),
+                    -1
+                )
+
+                # Добавляем координаты
+                hand_lines.append(
+                    (
+                        finger_x,
+                        finger_y
+                    )
+                )
+
+        # ====================================================
+        # РАКЕТКА ИЗ ДВУХ УКАЗАТЕЛЬНЫХ ПАЛЬЦЕВ
+        # ====================================================
+
+        if len(hand_lines) >= 2:
+
+            point1 = hand_lines[0]
+            point2 = hand_lines[1]
+
+            line_x1, line_y1 = point1
+            line_x2, line_y2 = point2
+
+            # Рисуем основную линию
+            cv2.line(
+                frame,
+                point1,
+                point2,
+                (0, 0, 255),
+                6
+            )
+
+            # Точки
+            cv2.circle(
+                frame,
+                point1,
+                10,
+                (0, 255, 255),
+                -1
+            )
+
+            cv2.circle(
+                frame,
+                point2,
+                10,
+                (0, 255, 255),
+                -1
+            )
+
+            # =================================================
+            # СТОЛКНОВЕНИЕ
+            # =================================================
+
+            (
+                collision,
+                closest_x,
+                closest_y
+            ) = checkBallLineCollision(
+                ball_x,
+                ball_y,
+                ball_radius,
+                line_x1,
+                line_y1,
+                line_x2,
+                line_y2
+            )
+
+            # Столкновение обрабатываем только один раз,
+            # чтобы мяч не получил несколько отскоков
+            # подряд.
+            if collision and not was_colliding:
+
+                # Небольшой сдвиг мяча от линии
+                dx = ball_x - closest_x
+                dy = ball_y - closest_y
+
+                distance = math.hypot(dx, dy)
+
+                if distance > 0:
+
+                    push = (
+                        ball_radius - distance + 2
+                    )
+
+                    ball_x += (
+                        dx / distance * push
+                    )
+
+                    ball_y += (
+                        dy / distance * push
+                    )
+
+                # Рассчитываем отражение
+                (
+                    speed_x,
+                    speed_y
+                ) = calculateBounce(
+                    ball_x,
+                    ball_y,
+                    speed_x,
+                    speed_y,
+                    line_x1,
+                    line_y1,
+                    line_x2,
+                    line_y2
+                )
+
+                # Если мяч после столкновения
+                # продолжает двигаться вниз,
+                # принудительно отправляем его вверх.
+                if speed_y > 0:
+
+                    speed_y = -abs(speed_y)
+
+            was_colliding = collision
+
+        else:
+
+            was_colliding = False
+
+        # ====================================================
+        # ФИЗИКА МЯЧА
+        # ====================================================
+
+        speed_y += GRAVITY
+
+        ball_x += speed_x
+        ball_y += speed_y
+
+        # ====================================================
+        # СТЕНЫ
+        # ====================================================
+
+        (
+            ball_x,
+            ball_y,
+            speed_x,
+            speed_y
+        ) = handleWallCollisions(
+            ball_x,
+            ball_y,
+            ball_radius,
+            speed_x,
+            speed_y,
+            frame_width,
+            frame_height
+        )
+
+        # ====================================================
+        # МЯЧ
+        # ====================================================
+
+        cv2.circle(
+            frame,
+            (
+                int(ball_x),
+                int(ball_y)
+            ),
+            ball_radius,
+            (0, 255, 0),
+            -1
+        )
+
+        # Обводка мяча
+        cv2.circle(
+            frame,
+            (
+                int(ball_x),
+                int(ball_y)
+            ),
+            ball_radius,
+            (255, 255, 255),
+            2
+        )
+
+        # ====================================================
+        # UI
+        # ====================================================
+
+        cv2.putText(
+            frame,
+            "Q - quit",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"Ball: {int(ball_x)}, {int(ball_y)}",
+            (20, 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"Speed: {speed_x:.1f}, {speed_y:.1f}",
+            (20, 105),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2
+        )
+
+        # ====================================================
+        # ПОКАЗ КАДРА
+        # ====================================================
+
+        cv2.imshow(
+            window_name,
+            frame
+        )
+
+        # Q — выход
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord("q"):
             break
+
+    # ========================================================
+    # ЗАКРЫТИЕ
+    # ========================================================
 
     cam.release()
+
     cv2.destroyAllWindows()
 
-# Инициализация объектов MediaPipe и запуск камеры
-hands, mp_drawing, mp_hands = initHandelObject()
-mainWhileCam(hands, mp_drawing, mp_hands)
 
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
-    # Инициализируем объекты для обработки рук
-    hands, mp_drawing, mp_hands = initHandelObject()
 
-    # Открываем камеру и начинаем обработку
-    mainWhileCam(hands, mp_drawing, mp_hands)
+    print("Starting OpenCV Ping Pong...")
+
+    try:
+
+        hand_landmarker = initHandelObject()
+
+        mainWhileCam(
+            hand_landmarker
+        )
+
+    except KeyboardInterrupt:
+
+        print("\nProgram stopped.")
+
+    except Exception as error:
+
+        print("\nERROR:")
+        print(error)
+
+    finally:
+
+        try:
+            hand_landmarker.close()
+        except Exception:
+            pass
+
